@@ -247,6 +247,136 @@ print('For these',n_predict, 'labels: ', y_test[0:n_predict])
 t2 = time.time()
 print(round(t2-t, 5), 'Seconds to predict', n_predict,'labels with SVC')
 
+#########################################Data Loading from Pickle
+
+print('Loading Classifier parameters...')
+dist_pickle = pickle.load( open("svc_pickle.p", "rb" ) )
+svc = dist_pickle["svc"]
+X_scaler = dist_pickle["scaler"]
+orient = dist_pickle["orient"]
+pix_per_cell = dist_pickle["pix_per_cell"]
+cell_per_block = dist_pickle["cell_per_block"]
+spatia = dist_pickle["spatial"]
+hist_bins = dist_pickle["hist_bins"]
+
+print('Loading is done!')
+
+#########################################HOG Sub-sampling Window Search
+# Extracts features using hog sub-sampling and make predictions
+def find_cars(img, svc, X_scaler, orient, pix_per_cell, cell_per_block, spatial_size, hist_bins, ystart_ystop_scale, h_shift=0, visualisation=False):
+    # List of bounding box positions
+    bbox_detection_list=[]
+    box_vis_list=[]
+    # Copy and normalise
+    draw_img = np.copy(img)
+    img = img.astype(np.float32)/255
+       
+    # Searching different size windows at different scales:
+    for (ystart, ystop, scale) in ystart_ystop_scale:
+        box_vis=[]
+        # Crop
+        img_tosearch = img[ystart:ystop, :, :]
+        ctrans_tosearch = cv2.cvtColor(img_tosearch, cv2.COLOR_RGB2YCrCb)
+        if scale != 1:
+            imshape = ctrans_tosearch.shape
+            ctrans_tosearch = cv2.resize(ctrans_tosearch, (np.int(imshape[1]/scale), np.int(imshape[0]/scale)))
+
+        ch1 = ctrans_tosearch[:,:,0]
+        ch2 = ctrans_tosearch[:,:,1]
+        ch3 = ctrans_tosearch[:,:,2]
+        
+        # Define blocks and steps as above
+        nxblocks = (ch1.shape[1] // pix_per_cell) - cell_per_block + 3
+        nyblocks = (ch1.shape[0] // pix_per_cell) - cell_per_block + 1 
+        nfeat_per_block = orient*cell_per_block**2
+
+        # 64 was the orginal sampling rate, with 8 cells and 8 pix per cell
+        window = 64
+        nblocks_per_window = (window // pix_per_cell) - cell_per_block + 1
+        cells_per_step = 2  # Instead of overlap, define how many cells to step
+        nxsteps = (nxblocks - nblocks_per_window) // cells_per_step
+        nysteps = (nyblocks - nblocks_per_window) // cells_per_step
+
+        # Compute individual channel HOG features for the entire image
+        hog1 = get_hog_features(ch1, orient, pix_per_cell, cell_per_block, feature_vec=False)
+        hog2 = get_hog_features(ch2, orient, pix_per_cell, cell_per_block, feature_vec=False)
+        hog3 = get_hog_features(ch3, orient, pix_per_cell, cell_per_block, feature_vec=False)
+
+        for xb in range(nxsteps):
+            for yb in range(nysteps):
+                ypos = yb*cells_per_step
+                xpos = xb*cells_per_step
+                # Extract HOG for this patch
+                hog_feat1 = hog1[ypos:ypos+nblocks_per_window, xpos:xpos+nblocks_per_window].ravel() 
+                hog_feat2 = hog2[ypos:ypos+nblocks_per_window, xpos:xpos+nblocks_per_window].ravel() 
+                hog_feat3 = hog3[ypos:ypos+nblocks_per_window, xpos:xpos+nblocks_per_window].ravel() 
+                hog_features = np.hstack((hog_feat1, hog_feat2, hog_feat3))
+
+                xleft = xpos*pix_per_cell
+                ytop = ypos*pix_per_cell
+
+                # Extract the image patch
+                subimg = cv2.resize(ctrans_tosearch[ytop:ytop+window, xleft:xleft+window], (64,64))
+
+                # Get color features
+                spatial_features = bin_spatial(subimg, size=spatial_size)
+                hist_features = color_hist(subimg, nbins=hist_bins)
+
+                # Scale features and make a prediction
+                test_features = X_scaler.transform(np.hstack((spatial_features, hist_features, hog_features)).reshape(1, -1))    
+
+                # Make prediction based on trained model 
+                test_prediction = svc.predict(test_features)
+                
+                if(visualisation):
+                    xbox_left = np.int(xleft*scale)
+                    ytop_draw = np.int(ytop*scale)
+                    win_draw = np.int(window*scale)
+                    # Append Detection Position to list 
+                    box_vis.append(((xbox_left, ytop_draw+ystart),(xbox_left+win_draw,ytop_draw+win_draw+ystart)))
+                
+                if test_prediction == 1:
+                    xbox_left = np.int(xleft*scale)
+                    ytop_draw = np.int(ytop*scale)
+                    win_draw = np.int(window*scale)
+                    # Append Detection Position to list 
+                    bbox_detection_list.append(((xbox_left+h_shift, ytop_draw+ystart),(xbox_left+win_draw+h_shift,ytop_draw+win_draw+ystart)))
+                    # Draw Detection on image
+                    cv2.rectangle(draw_img,(xbox_left+h_shift, ytop_draw+ystart),(xbox_left+win_draw+h_shift,ytop_draw+win_draw+ystart),(0,0,255),6) 
+        box_vis_list += [box_vis]
+    return bbox_detection_list, draw_img, box_vis_list
+
+########################################################## Region Proposer Visualisation
+test_image_sliding=test_images[0]
+ystart_ystop_scale = [(405, 510, 1), (400, 600, 1.5), (415, 710, 2.5)]
+bbox_detection_list, detections, box_vis_list = find_cars(test_image_sliding, svc, X_scaler, orient, pix_per_cell, cell_per_block, spatial_size, hist_bins, ystart_ystop_scale, h_shift=500, visualisation=True)
+
+def draw_boxes(img, bboxes, thickness=2):
+    imcopy = [np.copy(img),np.copy(img),np.copy(img)]
+    color=[(255, 0, 0),(0, 255, 0),(0, 0, 255)]
+    for i in range(len(bboxes)):
+        for bbox in bboxes[i]:
+            cv2.rectangle(img=imcopy[i], pt1=bbox[0], pt2=bbox[1],
+                          color=color[i], thickness=thickness)
+    return imcopy
+
+windows_img = draw_boxes(test_image_sliding, box_vis_list)
+
+f, ((ax1, ax2, ax3)) = plt.subplots(3, 1, figsize=(20,20))
+ax1.imshow(windows_img[0])
+title = "Scale: 0.9 "  + " Count: " + str(len(box_vis_list[0])) 
+ax1.set_title(title, fontsize=20)
+ax1.axis("off")
+ax2.imshow(windows_img[1])
+title = "Scale: 1.4"  + " Count: " + str(len(box_vis_list[1])) 
+ax2.set_title(title, fontsize=20)
+ax2.axis("off")
+ax3.imshow(windows_img[2])
+title = "Scale: 2.3"  + " Count: " + str(len(box_vis_list[2])) 
+ax3.set_title(title, fontsize=20)
+ax3.axis("off")
+
+plt.savefig('output_images/bbox_vis.png')
 
 
 
